@@ -1,19 +1,21 @@
 import random, re
 from math import log
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set, Union
 
 class NaiveBayes :
-
+    '''
+    Multinomial Naive Bayes
+    '''
     Count, Probaility = int, float
     Class, Output, Document, Word = str, str, str, str
 
     def __init__( self ) -> None :
         self.logPc  : Dict[ Class, Probability ] = {} 
         self.logPwc : Dict[ Class, Dict[ Word, Probability ] ] = {}
-        self.result : List[ Tuple[ Class, Output ] ] = []
-        self.vocabulary : Dict[ Class, Set[ Document ] ] = {}
-        self.classvocab : Dict[ Class, Set[ Document ] ] = {}
-        self.accuracy   : float = 0.0
+        self.vocabulary  : Dict[ Class, Set[ Document ] ] = {}
+        self.classvocab  : Dict[ Class, Set[ Document ] ] = {}
+        self.predictions : Dict[ Class, Dict[ Class, int ] ] = {}
+        self.accuracy = 0.0
         self.stop_words = {
             'if', 'might', 'big', 'opens', 'but', 'got',
             'almost', 'differently', 'since', 'why', 'things',
@@ -122,46 +124,96 @@ class NaiveBayes :
         '''
         assert self.logPwc, 'A Naive Bayes model must be trained.'
         tot_docs = 0
-        self.result = []
-        self.accuracy = 0.0
+        accuracy = 0.0
         for label in data :
+            self.predictions[ label ] = { label : 0 for label in data }
             for document in data[ label ] :
                 tot_docs += 1
                 output = self.output( document )
-                self.result.append( ( label, output ) )
-                self.accuracy += ( label == output )
-        self.accuracy = self.accuracy / tot_docs if tot_docs else 0
+                self.predictions[ label ][ output ] += 1
+                accuracy += ( label == output )
+        if tot_docs :
+            self.accuracy = accuracy / tot_docs
+        else :
+            self.accuracy = 0
         return
 
     def trainAndTest(
-        self : object,
-        data : Dict[ Class, Set[ Document ] ],
-        ratio : float = 0.5 # ratio of data to train model
+        self  : object,
+        data  : Dict[ Class, Set[ Document ] ],
+        ratio : float = 0.0,
+        iters : int = 10
         ) -> None :
         '''
-        Train and Test the Naive Bayes Model
+        Monte Carlo Cross-Validation
         '''
-        test  : Dict[ Class, List[ Document ] ] = {}
-        train : Dict[ Class, List[ Document ] ] = {}
-        for label in data :
-            index = int( ratio * len( data[ label ] ) )
-            shuffle = list( data[ label ] )
-            random.shuffle( shuffle )
-            train[ label ] = shuffle[ : index ]
-            test[ label ] = shuffle[ index : ]
-        self.train( train )
-        self.test( test )
-        print( 'Examples in Training Set:',
-               sum( len( train[ label ] ) for label in train ) )
-        print( 'Examples Tested         :',
-               sum( len( test[ label ] ) for label in test ) )
-        print( 'Total Examples          :',
-               sum( len( data[ label ] ) for label in data ) )
-        if self.result :
-            print( 'Model Accuracy          : {}%'.format(
-                round( 100*self.accuracy, 2 ) ) )
+        assert 0 <= ratio < 1, 'Ratio is between 0 and 1.'
+        test, train = {}, {}
+        ntested, ntrained = 0, 0
+        accuracy = []
+        truelabelnumb = { label : 0 for label in data }
+        predictions = {
+            label : { label : 0  for label in data }
+            for label in data
+            }
+        for _ in range( iters ) :
+            split = ratio if ratio else random.random()
+            for label in data :
+                index = int( split * len( data[ label ] ) )
+                while not index :
+                    split = random.random()
+                    index = int( split * len( data[ label ] ) )
+                shuffle = list( data[ label ] )
+                random.shuffle( shuffle )
+                train[ label ] = shuffle[ : index ]
+                test [ label ] = shuffle[ index : ]
+                truelabelnumb[ label ] += len( test[ label ] )
+                ntrained += len( train[ label ] )
+                ntested += len( test[ label ] )
+            self.train( train )
+            self.test( test )
+            accuracy.append( self.accuracy )
+            for label in self.predictions :
+                for predicted in self.predictions[ label ] :
+                    predictions[ label ][ predicted ] += \
+                        self.predictions[ label ][ predicted ]
+        # Calculating and displaying stats
+        # True Positive Rate : True Positives / Actual Positives
+        # False Positive Rate: False Positive / Actual Negatives
+        # Precision: True Positives / ( True Positives + False Positives )
+        # Recall   : True Positives / ( True Positives + False Negatives )
+        self.predictions = predictions.copy()
+        for label in predictions :
+            truth_rate = predictions[ label ][ label ] / truelabelnumb[ label ]
+            false_rate = (
+                sum( predictions[ label_ ][ label ]
+                     for label_ in predictions ) \
+                - predictions[ label ][ label ]
+                ) / sum(
+                    predictions[ label ][ output ]
+                    for output in predictions
+                    )
+            precision = predictions[ label ][ label ] / sum(
+                predictions[ label_ ][ label ]
+                for label_ in predictions
+                )
+            self.predictions[ label ][ 'precision'  ] = precision
+            self.predictions[ label ][ 'truth rate' ] = truth_rate
+            self.predictions[ label ][ 'false rate' ] = false_rate
+        if len( accuracy ) > 1 :
+            mean = sum( accuracy ) / len( accuracy )
+            stdv = sum( ( x - mean )**2 / ( len( accuracy ) - 1 )
+                         for x in accuracy )**0.5
+            deci = self.__decimalPlace( stdv )
         else :
-            print( 'Model Accuracy          : Unknown' )
+            mean, stdv, deci = self.accuracy, 0, 2
+        stdv = round( stdv, deci )
+        accuracy = round( mean, deci )
+        self.predictions[ 'model' ] = {}
+        self.predictions[ 'model' ][ 'accuracy' ] = '{}({})'.format( accuracy, stdv )
+        print( 'Examples Trained:', ntrained )
+        print( 'Examples Tested :', ntested )
+        print( 'Total Examples  :', ntrained + ntested )
         return
 
     def output( self : object, document : str ) -> Class :
@@ -169,17 +221,31 @@ class NaiveBayes :
         Output of Naive Bayes Model with Document Input
         '''
         assert self.logPwc, 'A Naive Bayes model must be trained.'
-        result : Dict[ Class, Probability ] = {}
-        for label in self.classvocab :
-            result[ label ] = self.logPc[ label ]
-            for word in re.findall(
-                pattern = '\\b[a-z]{2,}\\b',
-                string  = document
-                ) :
-                if word in self.vocabulary :
+        result = { label : self.logPc[ label ]
+                   for label in self.classvocab }
+        for word in re.findall(
+            pattern = '\\b[a-z]{2,}\\b',
+            string  = document
+            ) :
+            if word in self.vocabulary :
+                for label in self.classvocab :
                     result[ label ] += self.logPwc[ label ][ word ]
         label, prob = zip( *result.items() )
         return label[ prob.index( max( prob ) ) ]
+
+    def __decimalPlace( self, n : Union[ int, str ] ) -> int :
+        n = str( n )
+        if '.' in n :
+            i, f = str( n ).split( '.' )
+            if i != '0' :
+                return -len( i )
+            rslt = 0
+            for digit in f :
+                rslt += 1
+                if digit != '0' :
+                    return rslt
+        return -len( n )
+                    
 
     def __extract(
         self : object,
